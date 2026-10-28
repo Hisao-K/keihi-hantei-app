@@ -319,7 +319,7 @@ function historyRows(h){
     const row = {date, kind:r.kind, from:r.from || "", to:r.to || "", amount:+r.amount || 0, dup:false, on:false};
     if(!ride) return row;
     const same = D.entries.filter(e => !used.has(e.id) && e.date === date && +e.amount === row.amount);
-    const hit = same.find(e => routeOf(row) && String(e.memo || "").includes(routeOf(row)))
+    const hit = same.find(e => routeOf(row) && (String(e.payee || "") + String(e.memo || "")).includes(routeOf(row)))
              || same.find(e => e.kamoku === "旅費交通費");
     if(hit){ used.add(hit.id); row.dup = true }
     row.on = !row.dup;
@@ -348,7 +348,7 @@ function historyPanel(){
   });
   const btn = el(`<button class="go" id="histSave" style="margin-top:12px"></button>`);
   btn.onclick = recordHistory;
-  const note = el(`<p class="qhint" style="margin:8px 0 0">勘定科目は旅費交通費、摘要は区間で記録します。だれと・何のための移動かは、あとで台帳の各行の「更新」から摘要に足してください。</p>`);
+  const note = el(`<p class="qhint" style="margin:8px 0 0">勘定科目は旅費交通費、相手先は「電車（SF）区間」、摘要は「SF（電子マネー）利用履歴より。1回分（運賃）」で記録します。だれと・何のための移動かは、あとで台帳の各行の「更新」から摘要に足してください。</p>`);
   const box = el(`<div></div>`);
   box.appendChild(w); box.appendChild(btn); box.appendChild(note);
   return box;
@@ -368,10 +368,13 @@ function recordHistory(){
     /* 手で入れるときと同じ初期の答えで判定する（業務のための移動・事業専用 など） */
     REC = Object.assign(blankRec(), {catId:"transport", date:r.date, amount:r.amount});
     resetAns();
+    REC.ans.pay = "cash";
     const {v} = computeJudge();
+    /* 書き方は、手で入れてきた利用履歴の記録にそろえる（相手先＝電車（SF）区間、摘要＝SF（電子マネー）利用履歴より。1回分（金額）） */
     D.entries.push({id:uid(), date:r.date, amount:r.amount, ratio:100, biz:r.amount, kamoku:REC.kamoku,
-      payee: OCR.card || "交通系ICカード", memo: routeOf(r), catName: cat.n, verdict:v,
-      receiptId: keep.receiptId, photoId:null, ans:Object.assign({}, REC.ans)});
+      payee: (r.from && r.to ? "電車" : "交通") + "（SF）" + routeOf(r),
+      memo: `SF（電子マネー）利用履歴より。1回分（${r.amount.toLocaleString("ja-JP")}円）`,
+      catName: cat.n, verdict:v, receiptId: keep.receiptId, photoId:null, ans:Object.assign({}, REC.ans)});
   });
   saveD(); pumpPhotos();
   REC = blankRec(); resetAns(); OCR = {busy:false, msg:"", file:""};
