@@ -259,15 +259,18 @@ async function ocrRun(){
   if(!res.ok){
     OCR = {busy:false, file:name, msg: res.code === "OCR_EMPTY"
       ? "この写真からは文字を読み取れませんでした。金額などは下の欄に入れてください。" + askDesk
+      : res.code === "NOT_RECEIPT"
+      ? "この写真は、1回の支払いの領収書・レシートではないようです（利用履歴や明細の一覧など）。1回分ずつ、金額・日付・相手先を下の欄に入れてください。"
       : "読み取れませんでした。" + (res.message || "") + " 金額などは下の欄に入れてください。"};
     drawRec(); return;
   }
 
-  /* 金額か日付が取れなかったときは、写真の文字の並びから拾う */
+  /* 金額か日付が取れなかったときは、写真の文字の並びから拾う。
+     相手先は拾わない（文字の1行目は店名とは限らず、画面の時刻などが入ることがある） */
   let j = res.result || {};
   if(j.text && (!(+j.amount > 0) || !j.date)){
     const r2 = ocrRules(j.text);
-    j = {amount: +j.amount > 0 ? j.amount : r2.amount, date: j.date || r2.date, payee: j.payee || r2.payee, item: j.item};
+    j = {amount: +j.amount > 0 ? j.amount : r2.amount, date: j.date || r2.date, payee: j.payee, item: j.item};
   }
 
   const got = [];
