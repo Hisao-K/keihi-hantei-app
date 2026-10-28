@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>経費判定君</title>
+<meta name="theme-color" content="#2B4A7D">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="経費判定君">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="referrer" content="no-referrer">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+<script src="config.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+<header>
+  <div class="hbar">
+    <span class="logo">経費判定<em>君</em></span>
+    <span class="hmeta" id="hmeta"></span>
+    <span class="pend" id="pend" hidden>未送信</span>
+    <span class="who" id="who"></span>
+    <button class="hclose" id="logout" hidden>閉じる</button>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ══════════ はじめの設定（GASのURLがまだない） ══════════ -->
+<section class="view" id="view-setup" hidden>
+  <div class="card pad" style="margin-top:18px">
+    <div class="eyebrow">はじめの設定</div>
+    <p class="lede" style="margin:6px 0 12px">管理者から届いた「設定用リンク」を開いてください。リンクが開けないときは、設定コード（https://script.google.com/… で始まるURL）を貼り付けてください。</p>
+    <input type="url" id="setupUrl" inputmode="url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off">
+    <button class="go" id="setupSave">保存する</button>
+    <p class="lede" id="setupMsg" style="margin:10px 0 0"></p>
+  </div>
+</section>
+
+<!-- ══════════ ログイン ══════════ -->
+<section class="view" id="view-login" hidden>
+  <div class="card pad" style="margin-top:18px">
+    <div class="eyebrow">ログイン</div>
+    <p class="lede" style="margin:6px 0 14px">会社の Google アカウントでログインしてください。管理者が登録した人だけが使えます。記録を見られるのは、本人と管理者だけです。</p>
+    <div id="gsiButton"></div>
+    <p class="lede" id="loginMsg" style="margin:12px 0 0;white-space:pre-line"></p>
+  </div>
+</section>
+
+<!-- ══════════ 記録 ══════════ -->
+<section class="page on" id="p-rec">
+  <div id="gate" style="display:none"></div>
+
+  <div id="recWrap">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+      <div class="seg" id="recSeg" style="flex:1">
+        <button data-v="keihi" aria-pressed="true">経費</button>
+        <button data-v="car" aria-pressed="false">運行</button>
+        <button data-v="inv" aria-pressed="false">投資</button>
+      </div>
+      <select id="yearSel" class="yearsel"></select>
+    </div>
+
+    <div id="recKeihi">
+      <div class="card" id="recForm"></div>
+      <div id="recVerdict"></div>
+      <div style="display:flex;gap:8px;margin:14px 0 0">
+        <button class="go" id="recSave" style="margin:0;flex:2">台帳に保存する</button>
+        <button class="ghost" id="recReset" style="flex:1">入力を消す</button>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:8px;margin-top:26px">
+        <h2 class="sec" style="margin:0;flex:1">この年の記録</h2>
+        <span class="hmeta" id="ledgerMini"></span>
+      </div>
+      <div class="card"><ul class="hist" id="histList"></ul></div>
+    </div>
+
+    <div id="recInv" style="display:none">
+  <div class="note" style="margin-bottom:14px">
+    <b>事業の経費台帳とは別に集計します。</b>仮想通貨は雑所得（総合課税）、上場株式等は申告分離課税で、確定申告書の書く場所が違います。売買手数料や取得価額をこちらに入れると、事業の経費には入りません。
+  </div>
+
+  <div class="card pad" id="repBox" style="margin-bottom:14px">
+    <div class="eyebrow">年間取引報告書</div>
+    <p class="lede" style="margin:6px 0 10px">証券会社・取引所から年明けに届く <b>特定口座年間取引報告書</b> や <b>年間取引報告書</b> をここに入れると、ドライブの <b>経費判定デスク／年間取引報告書</b> に保存されます。PDF・画像・CSVのどれでも構いません。</p>
+    <div class="shot"><label class="pick"><svg viewBox="0 0 24 24"><path d="M12 16V4M8 8l4-4 4 4"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>ファイルを選ぶ
+      <input type="file" id="repFile" accept="image/*,application/pdf,.pdf,.csv,text/csv" multiple style="display:none"></label><span id="repHold"></span></div>
+    <div id="repList" class="qhint" style="margin-top:10px"></div>
+  </div>
+
+  <div class="seg" id="invSeg" style="margin-bottom:12px">
+    <button data-v="crypto" aria-pressed="true">仮想通貨</button>
+    <button data-v="stock" aria-pressed="false">株式</button>
+    <button data-v="fx" aria-pressed="false">FX</button>
+  </div>
+
+  <div id="invCrypto">
+    <div class="card pad" id="cryptoSum"></div>
+    <h2 class="sec">前年からの繰越</h2>
+    <div class="card" id="openList"></div>
+    <button class="ghost" id="addOpen" style="margin-top:10px">＋ 銘柄の繰越を追加</button>
+    <div id="openForm" style="display:none">
+      <div class="card" id="openFields"></div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="go" id="openSave" style="margin:0;flex:2">保存</button>
+        <button class="ghost" id="openCancel" style="flex:1">やめる</button>
+      </div>
+    </div>
+    <h2 class="sec">取引</h2>
+    <button class="go" id="addTrade" style="margin-top:0">＋ 取引を記録する</button>
+    <div id="tradeForm" style="display:none">
+      <div class="card" id="tradeFields"></div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="go" id="tradeSave" style="margin:0;flex:2">保存</button>
+        <button class="ghost" id="tradeCancel" style="flex:1">やめる</button>
+      </div>
+    </div>
+    <div class="card" style="margin-top:12px"><ul class="hist" id="tradeList"></ul></div>
+  </div>
+
+  <div id="invStock" style="display:none">
+    <div class="card pad" id="stockSum"></div>
+    <h2 class="sec">口座ごとの年間損益</h2>
+    <p class="lede" style="margin:0 0 10px">特定口座は年間取引報告書の数字をそのまま入れてください。一般口座は自分で計算した年間の合計を入れます。</p>
+    <button class="go" id="addStock" style="margin-top:0">＋ 口座を追加する</button>
+    <div id="stockForm" style="display:none">
+      <div class="card" id="stockFields"></div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="go" id="stockSave" style="margin:0;flex:2">保存</button>
+        <button class="ghost" id="stockCancel" style="flex:1">やめる</button>
+      </div>
+    </div>
+    <div class="card" style="margin-top:12px"><ul class="hist" id="stockList"></ul></div>
+    <div id="stockAdvice"></div>
+  </div>
+
+  <div id="invFx" style="display:none">
+    <div class="note warnbox" style="margin-bottom:12px">
+      <b>FXは第3の枠です。</b>「先物取引に係る雑所得等」として申告分離課税（所得税15.315%＋住民税5%＝20.315%）。<b>株式等とも、仮想通貨の雑所得とも通算できません。</b>損失は3年繰り越せます（毎年の申告が要件）。同じ枠で通算できるのは先物・オプション・CFDなどです。
+    </div>
+    <div class="card pad" id="fxSum"></div>
+    <h2 class="sec">口座ごとの年間損益</h2>
+    <button class="go" id="addFx" style="margin-top:0">＋ 口座を追加する</button>
+    <div id="fxForm" style="display:none">
+      <div class="card" id="fxFields"></div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="go" id="fxSave" style="margin:0;flex:2">保存</button>
+        <button class="ghost" id="fxCancel" style="flex:1">やめる</button>
+      </div>
+    </div>
+    <div class="card" style="margin-top:12px"><ul class="hist" id="fxList"></ul></div>
+    <div id="fxAdvice"></div>
+  </div>
+    </div>
+
+    <div id="recCar" style="display:none">
+      <div class="note" style="margin-bottom:14px">
+        <b>車の費用は、業務で走った距離の割合しか経費になりません。</b>その割合を証明できるのは運行記録だけです。ここに業務で走った分を1件ずつ入れると、事業使用割合が出ます。
+      </div>
+
+      <h2 class="sec">この年の総走行距離</h2>
+      <div class="card pad">
+        <div class="q"><div class="qlab">年初のメーター</div>
+          <div class="numrow"><input type="number" id="odoStart" inputmode="numeric" min="0"><span class="unit">km</span></div></div>
+        <div class="q"><div class="qlab">年末のメーター</div>
+          <div class="qhint">年の途中なら、いま現在の数字で構いません。あとから直せます。</div>
+          <div class="numrow"><input type="number" id="odoEnd" inputmode="numeric" min="0"><span class="unit">km</span></div></div>
+        <div id="odoSum" class="qhint" style="margin-top:10px"></div>
+      </div>
+
+      <h2 class="sec">業務で走った記録</h2>
+      <button class="go" id="addTrip" style="margin-top:0">＋ 運行を記録する</button>
+      <div id="tripForm" style="display:none">
+        <div class="card" id="tripFields"></div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="go" id="tripSave" style="margin:0;flex:2">保存</button>
+          <button class="ghost" id="tripCancel" style="flex:1">やめる</button>
+        </div>
+      </div>
+      <div class="card" style="margin-top:12px"><ul class="hist" id="tripList"></ul></div>
+      <div id="carRatioBox"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════ 申告の一覧 ══════════ -->
+<section class="page" id="p-tax">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+    <h2 class="sec" style="margin:0;flex:1">確定申告の金額一覧</h2>
+    <select id="yearSel3" class="yearsel"></select>
+  </div>
+  <div id="taxBody"></div>
+</section>
+
+<!-- ══════════ 全体（管理者） ══════════ -->
+<section class="page" id="p-all">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+    <h2 class="sec" style="margin:0;flex:1">全体の集計</h2>
+    <select id="yearSel4" class="yearsel"></select>
+  </div>
+  <div class="note" style="margin-bottom:14px"><b>判定は、その人の基本項目で出した結果です。</b>利用者の記録の判定（○△×）と計上額は、記録した人の基本項目（事業形態・消費税・給与の支払など）を前提にしています。管理者と前提が違う人がいると、同じ支出でも判定が変わることがあります。</div>
+  <div id="allBody"></div>
+  <h2 class="sec">利用者</h2>
+  <div id="userBody"></div>
+</section>
+
+<!-- ══════════ 根拠 ══════════ -->
+<section class="page" id="p-refs">
+  <h2 class="sec">判定の根拠</h2>
+  <div class="note" style="margin-bottom:14px">
+    <b>準拠の順番。</b>①国税庁の公表情報（下記リンク）→ ②所得税法・法人税法・各通達 → ③実務上の一般的な取扱い。動画や解説記事は判定の根拠に使っていません。金額基準は<b>2026年8月16日時点</b>で国税庁ページを確認した値です。
+  </div>
+  <div class="card"><ul class="refs" id="refList"></ul></div>
+
+  <h2 class="sec">確認した数値基準</h2>
+  <div class="card scroller"><table class="jr" id="numTable"></table></div>
+
+  <h2 class="sec">期限が近い／切れている論点</h2>
+  <div class="card pad">
+    <div class="note warnbox">
+      <b>少額減価償却資産の30万円特例。</b>国税庁 No.5408 の本文は「平成18年4月1日から<b>令和8年3月31日</b>までの間に取得」と書かれたままで、延長の記載がありません。2026年4月以降に買ったものにこの特例が使えるかは、確定申告の前に必ず最新の同ページで確認してください。このツールは「要確認」として判定に出します。
+    </div>
+    <div class="note warnbox" style="margin-top:10px">
+      <b>インボイスの経過措置。</b>いまは免税事業者からの仕入れの<b>80%</b>が控除できますが、これは<b>令和8年9月30日まで</b>。令和8年10月1日〜令和10年9月30日は<b>70%</b>に下がります（令和8年度改正で2年延長・割合見直し）。以降 50% → 30% → 0%。
+    </div>
+  </div>
+
+  <h2 class="sec">このツールの限界</h2>
+  <div class="card pad lede">
+    <p style="margin:0 0 10px">判定は<b>入力した内容だけ</b>を見ています。同じ費目でも、実際の使い方・相手先・過去の申告内容によって結論は変わります。金額が大きいもの、前例のないもの、税務調査で指摘されたものは、必ず顧問税理士に確認してください。</p>
+    <p style="margin:0">このツールは税務代理・税務相談を行うものではなく、利用者自身の事業の記帳を整えるためのセルフチェックです。最終的な申告の責任は申告者本人にあります。</p>
+  </div>
+</section>
+
+<!-- ══════════ 設定 ══════════ -->
+<section class="page" id="p-set">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+    <h2 class="sec" style="margin:0;flex:1">確定申告の基本項目</h2>
+    <select id="yearSel2" class="yearsel"></select>
+  </div>
+  <p class="lede" style="margin:0 0 12px">ここが経費の判定と一覧の前提になります。<b>先にここを埋めてください。</b>あとから変えると、それまでの判定結果も新しい前提で出し直されます。</p>
+  <div class="card" id="setList"></div>
+
+  <div id="incomeWrap">
+    <h2 class="sec">この年の収入</h2>
+    <div class="card" id="incomeList"></div>
+  </div>
+  <div id="setupDoneSlot"></div>
+
+  <h2 class="sec">保存先</h2>
+  <div class="card pad">
+    <div style="font-family:var(--mincho);font-size:19px;font-weight:600;letter-spacing:.04em;margin:2px 0 6px">Google ドライブ（会社）</div>
+    <p class="lede" id="driveMsg" style="margin:0 0 10px">確認しています…</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="go" id="driveSaveBtn" style="margin:0;flex:2;min-width:12rem">ドライブに保存する</button>
+      <button class="ghost" id="driveLoadBtn" style="flex:1;min-width:8rem">読み込む</button>
+    </div>
+    <p class="lede" style="margin:10px 0 0">会社のドライブの <b>経費判定デスク</b> フォルダに、人ごとに保存します。記録するたびに自動で保存し、開いたとき・アプリに戻ってきたときに読み込みます。<b>ほかの端末で直した内容も届きます。</b>見られるのは本人と管理者だけです。</p>
+  </div>
+
+  <h2 class="sec">保存されているもの</h2>
+  <div class="card pad" id="storeInfo"></div>
+  <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+    <button class="ghost" id="saveBackup">バックアップ（JSON）</button>
+    <button class="ghost" id="loadBackup">取り込み</button>
+  </div>
+  <input type="file" id="backupFile" accept=".json,application/json" style="display:none">
+  <p class="lede" style="margin-top:10px">バックアップは、写真も含めて丸ごと書き出したいときに使います。<b>claude.ai 版から移るとき</b>は、claude.ai 版で書き出したバックアップをここで取り込むと、写真もドライブに上がります。</p>
+  <button class="ghost" id="openRefs" style="margin-top:12px;width:100%">判定の根拠と数値基準を見る →</button>
+  <h2 class="sec">見た目</h2>
+  <div class="card"><div class="q">
+    <div class="qlab">配色</div>
+    <div class="qhint">端末の設定に合わせるのが既定です。</div>
+    <div class="seg" id="themeSeg">
+      <button data-v="auto">端末に合わせる</button><button data-v="light">明るい</button><button data-v="dark">暗い</button>
+    </div>
+  </div></div>
+</section>
+
+<footer>
+  経費判定君 ／ 判定基準の確認日 2026-08-16 ／ 準拠先＝国税庁
+</footer>
+</div>
+
+<nav class="tabs">
+  <ul>
+    <li><button data-p="rec" aria-selected="true"><svg viewBox="0 0 24 24"><path d="M3 8a2 2 0 0 1 2-2h2l1.5-2h7L17 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.5" r="3.5"/></svg>記録</button></li>
+    <li><button data-p="tax" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M6 3h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>申告の一覧</button></li>
+    <li id="navAll" hidden><button data-p="all" aria-selected="false"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5"/><circle cx="17" cy="9" r="2.5"/><path d="M15.5 14.2c2.4-.3 4.4 1.3 5 4.8"/></svg>全体</button></li>
+    <li><button data-p="set" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="17" cy="18" r="2.5"/></svg>基本項目</button></li>
+  </ul>
+</nav>
+
+<div class="busy" id="busy" hidden><div class="box"><span class="spin"></span><span id="busyText">処理しています…</span></div></div>
+
+<script src="ledger.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
