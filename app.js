@@ -254,7 +254,12 @@ async function ocrRun(){
   let res;
   try{ res = await api("ocr", {fileId:fid}) }catch(e){ res = {ok:false, message:e.message} }
   const name = res.fileName || (rec && rec.name) || "";
-  const askDesk = name ? "デスクに頼むときは「" + name + " を読み取って」と伝えてください（写真はドライブに保存済みです）。" : "";
+  if(res.ok && res.history){
+    OCR = {busy:false, file:name, history: historyRows(res.history), card: res.history.card || "",
+      msg: "交通系ICカードの利用履歴として読み取りました。記録する乗車を選んでください。"};
+    drawRec(); return;
+  }
+  const askDesk = name ?"デスクに頼むときは「" + name + " を読み取って」と伝えてください（写真はドライブに保存済みです）。" : "";
 
   if(!res.ok){
     OCR = {busy:false, file:name, msg: res.code === "OCR_EMPTY"
@@ -290,6 +295,89 @@ async function ocrRun(){
     ? "読み取りました：" + got.join("／") + "　違っていれば直してください。科目と按分は下で選んでください。"
     : "文字は取れましたが、金額と日付を読み分けられませんでした。下の欄に入れてください。" + askDesk};
   drawRec();
+}
+
+/* ═══════════════ 交通系ICカードの利用履歴 ═══════════════
+   利用履歴の画面を読み取ったら、乗車を1件ずつ一覧にし、選んだものをまとめて交通費として記録する。
+   台帳にすでにある乗車（同じ日付・金額で、区間が摘要にある／勘定科目が旅費交通費）は「記録済み」としてチェックを外す。 */
+/* 年が写っていない日付は今日の年。今日より先になるなら前の年 */
+function histDate(s){
+  const t = String(s || "").trim();
+  const full = ocrDate(t);
+  if(full) return full;
+  const m = t.match(/^(\d{1,2})[\/\-.月](\d{1,2})日?$/);
+  if(!m) return null;
+  const now = today(), y = +now.slice(0,4);
+  const d = `${y}-${String(+m[1]).padStart(2,"0")}-${String(+m[2]).padStart(2,"0")}`;
+  return d > now ? `${y-1}${d.slice(4)}` : d;
+}
+const routeOf = r => [r.from, r.to].filter(Boolean).join("→");
+function historyRows(h){
+  const used = new Set();
+  return (h.rows || []).map(r => {
+    const date = histDate(r.date), ride = r.kind === "ride" && !!date;
+    const row = {date, kind:r.kind, from:r.from || "", to:r.to || "", amount:+r.amount || 0, dup:false, on:false};
+    if(!ride) return row;
+    const same = D.entries.filter(e => !used.has(e.id) && e.date === date && +e.amount === row.amount);
+    const hit = same.find(e => routeOf(row) && String(e.memo || "").includes(routeOf(row)))
+             || same.find(e => e.kamoku === "旅費交通費");
+    if(hit){ used.add(hit.id); row.dup = true }
+    row.on = !row.dup;
+    return row;
+  });
+}
+/* 同じ写真をほかの記録も使っているか（利用履歴から作った記録は、1枚の写真を共有する） */
+const photoShared = (receiptId, photoId, exceptId) =>
+  D.entries.some(e => e.id !== exceptId && ((receiptId && e.receiptId === receiptId) || (photoId && e.photoId === photoId)));
+
+function historyPanel(){
+  const rows = OCR.history || [];
+  const w = el(`<div class="card" style="margin-top:12px"><ul class="hist"></ul></div>`);
+  const ul = w.querySelector("ul");
+  const KIND = {charge:"チャージ（経費にしない）", purchase:"買い物（1件ずつ手で）", other:"そのほか（1件ずつ手で）"};
+  rows.forEach(r => {
+    const ride = r.kind === "ride" && r.date;
+    const li = el(`<li>
+      ${ride ? `<input type="checkbox" style="width:20px;height:20px;flex:0 0 auto"${r.on?" checked":""}>` : `<span style="width:20px;flex:0 0 auto"></span>`}
+      <span class="hbody"><span class="ht">${ride ? esc(routeOf(r) || "乗車") : esc(KIND[r.kind] || "そのほか")}${r.dup?`<span class="tag" style="color:var(--ok);border:1px solid var(--ok-line);background:var(--ok-soft)">記録済み</span>`:""}</span>
+      <span class="hs">${esc(r.date || "日付不明")}${!ride && r.from ? " ・ " + esc(r.from) : ""}</span></span>
+      <span class="hamt"${ride?"":` style="color:var(--ink3)"`}>${yen(r.amount)}</span></li>`);
+    const cb = li.querySelector("input");
+    if(cb) cb.onchange = () => { r.on = cb.checked; drawHistoryBtn() };
+    ul.appendChild(li);
+  });
+  const btn = el(`<button class="go" id="histSave" style="margin-top:12px"></button>`);
+  btn.onclick = recordHistory;
+  const note = el(`<p class="qhint" style="margin:8px 0 0">勘定科目は旅費交通費、摘要は区間で記録します。だれと・何のための移動かは、あとで台帳の各行の「更新」から摘要に足してください。</p>`);
+  const box = el(`<div></div>`);
+  box.appendChild(w); box.appendChild(btn); box.appendChild(note);
+  return box;
+}
+function drawHistoryBtn(){
+  const b = $("histSave"); if(!b) return;
+  const n = (OCR.history || []).filter(r => r.on).length;
+  b.textContent = n ? `選んだ ${n} 件を交通費として記録する` : "記録する乗車を選んでください";
+  b.disabled = !n;
+}
+function recordHistory(){
+  const pick = (OCR.history || []).filter(r => r.on && r.kind === "ride" && r.date);
+  if(!pick.length) return;
+  const keep = REC;
+  const cat = CATS.find(c => c.id === "transport");
+  pick.forEach(r => {
+    /* 手で入れるときと同じ初期の答えで判定する（業務のための移動・事業専用 など） */
+    REC = Object.assign(blankRec(), {catId:"transport", date:r.date, amount:r.amount});
+    resetAns();
+    const {v} = computeJudge();
+    D.entries.push({id:uid(), date:r.date, amount:r.amount, ratio:100, biz:r.amount, kamoku:REC.kamoku,
+      payee: OCR.card || "交通系ICカード", memo: routeOf(r), catName: cat.n, verdict:v,
+      receiptId: keep.receiptId, photoId:null, ans:Object.assign({}, REC.ans)});
+  });
+  saveD(); pumpPhotos();
+  REC = blankRec(); resetAns(); OCR = {busy:false, msg:"", file:""};
+  drawRec(); drawLedger(); drawYears();
+  say(`${pick.length}件を交通費として記録しました。`);
+  window.scrollTo({top:0,behavior:"smooth"});
 }
 
 /* ═══════════════ ファイル保存（CSV） ═══════════════ */
@@ -1199,6 +1287,7 @@ function drawRec(){
   om.style.color = OCR.busy ? "var(--accent-ink)" : "";
   om.style.display = OCR.msg ? "" : "none";
   box.appendChild(shot);
+  if(OCR.history && !OCR.busy){ box.appendChild(historyPanel()); setTimeout(drawHistoryBtn) }
   if(REC.receiptId) showEntryPhoto(shot.querySelector("#shotHold"),
     {receiptId:REC.receiptId, photoId: REC.receiptId === REC.origReceiptId ? REC.origPhotoId : null}, false, false,
     () => { if(REC.receiptId !== REC.origReceiptId) discardShot(REC.receiptId); REC.receiptId = null; drawRec() });
@@ -1321,10 +1410,10 @@ function saveRec(){
     photoId: keepPhoto ? (REC.origPhotoId || null) : null,
     ans: Object.assign({}, REC.ans)};
   /* 撮り直した・外した写真は、保存したときに片づける（やめたときは元の写真が残る） */
-  if(wasEdit && REC.origReceiptId && !keepPhoto){
+  if(wasEdit && REC.origReceiptId && !keepPhoto && !photoShared(REC.origReceiptId, REC.origPhotoId, REC.id)){
     IDB.del(REC.origReceiptId).catch(()=>{}); SHOTS.delete(REC.origReceiptId);
     trashLater(REC.origPhotoId);
-  } else if(wasEdit && !REC.origReceiptId && REC.origPhotoId && !keepPhoto) trashLater(REC.origPhotoId);
+  }
   const i = D.entries.findIndex(x=>x.id===row.id);
   if(i>=0) D.entries[i] = row; else D.entries.push(row);
   saveD(); pumpPhotos();
@@ -1405,8 +1494,10 @@ function drawLedger(){
     };
     li.querySelector('[data-a=del]').onclick = async () => {
       if(!await ask("この記録を削除します。もとに戻せません。","削除する")) return;
-      if(e.receiptId){ IDB.del(e.receiptId).catch(()=>{}); SHOTS.delete(e.receiptId) }
-      trashLater(e.photoId);
+      if(!photoShared(e.receiptId, e.photoId, e.id)){
+        if(e.receiptId){ IDB.del(e.receiptId).catch(()=>{}); SHOTS.delete(e.receiptId) }
+        trashLater(e.photoId);
+      }
       dropRow("entries", e.id); saveD(); drawLedger();
     };
     ul.appendChild(li);
