@@ -2,7 +2,7 @@
 // 画面のファイル（HTML・JS・CSS・アイコン）だけを置いておき、電波がなくてもアプリが開くようにする。
 // 台帳と写真（GASとのやり取り）は別のサイトあてなので、ここでは扱わない・保存しない。
 // 画面を更新したら VERSION を上げる。
-const VERSION = 'keihi-v1';
+const VERSION = 'keihi-v2';
 const SHELL = [
   './',
   './index.html',
