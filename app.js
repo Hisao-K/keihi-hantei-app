@@ -7,9 +7,16 @@ const isAdmin = () => ME.role === "admin";
 const LS = {
   key(k){ return "keihi." + (ME.email || "_") + "." + k },
   get(k,d){ try{ const v=localStorage.getItem(this.key(k)); return v?JSON.parse(v):d }catch(e){ return d } },
-  set(k,v){ try{ localStorage.setItem(this.key(k),JSON.stringify(v)) }catch(e){} },
+  set(k,v){ try{ localStorage.setItem(this.key(k),JSON.stringify(v)); return true }catch(e){ return false } },
   del(k){ try{ localStorage.removeItem(this.key(k)) }catch(e){} },
 };
+/* この端末に控えられなかったとき（容量がいっぱい・プライベートブラウズ）は一度だけ知らせる */
+let LS_WARNED = false;
+function lsFailed(){
+  if(LS_WARNED) return;
+  LS_WARNED = true;
+  say("この端末に控えを保存できませんでした（容量がいっぱいか、保存が止められています）。電波があるうちにドライブへ送ってください。");
+}
 /* 見た目は端末ごと（人の基本項目に入れない） */
 const THEME = {
   get(){ try{ return localStorage.getItem("keihi.theme") || "auto" }catch(e){ return "auto" } },
@@ -25,7 +32,7 @@ const ROWK = Ledger.ROWK, MAPK = Ledger.MAPK;
 /* 台帳を入れ替える（ログイン・ドライブからの読み込み・閉じる）。S と D は同じ入れ物のまま中身だけ替える */
 function resetState(settings, data){
   Object.keys(S).forEach(k=>delete S[k]);
-  Object.assign(S, S_DEF, settings||{});
+  Object.assign(S, S_DEF, Ledger.cleanSettings(settings||{}));
   delete S.theme;
   Object.keys(D).forEach(k=>delete D[k]);
   Object.assign(D, Ledger.norm(data));
@@ -49,8 +56,9 @@ function snapTake(){
   MAPK.forEach(k => Object.keys(D[k]||{}).forEach(y => SNAP.set(k+"@"+y, JSON.stringify(D[k][y]))));
   SNAP_S = setSig();
 }
+let LAST_T = 0;
 function stamp(){
-  const now = Date.now();
+  const now = LAST_T = Math.max(Date.now(), LAST_T + 1);
   ROWK.forEach(k => (D[k]||[]).forEach(r => {
     const s = rowSig(r);
     if(SNAP.get(k+":"+r.id) !== s){ r.t = now; SNAP.set(k+":"+r.id, s) }
@@ -61,12 +69,13 @@ function stamp(){
     if(SNAP.get(k+"@"+y) !== s){ D.mt[k+":"+y] = now; SNAP.set(k+"@"+y, s) }
   }));
 }
-const saveD = () => { if(!ME.email) return; stamp(); LS.set("data", D); markDirty() };
+const saveD = () => { if(!ME.email) return; stamp(); if(!LS.set("data", D)) lsFailed(); markDirty() };
 const saveS = () => {
   if(!ME.email) return;
   const s = setSig();
-  if(s !== SNAP_S){ S.t = Date.now(); SNAP_S = setSig() }
-  LS.set("settings", S); markDirty();
+  if(s !== SNAP_S){ S.t = LAST_T = Math.max(Date.now(), LAST_T + 1); SNAP_S = setSig() }
+  if(!LS.set("settings", S)) lsFailed();
+  markDirty();
 };
 
 /* 行を消したら墓標を残す。残さないと、ほかの端末と合わせたときに復活する */
@@ -80,7 +89,7 @@ function applyServer(led){
   const set  = JSON.parse(JSON.stringify(Ledger.mergeSettings(led && led.settings, S)));
   const mine = !led
     || JSON.stringify(Ledger.norm(led.data)) !== JSON.stringify(data)
-    || JSON.stringify(led.settings || {}) !== JSON.stringify(set);
+    || JSON.stringify(Ledger.cleanSettings(led.settings || {})) !== JSON.stringify(set);
   const before = JSON.stringify([S, D]);
   resetState(set, data);
   LS.set("data", D); LS.set("settings", S);
@@ -111,6 +120,7 @@ const IDB = {
       let out; try{ out = fn(s) }catch(e){ rej(e); return }
       t.oncomplete = () => res(out && out.result !== undefined ? out.result : out);
       t.onerror = () => rej(t.error);
+      t.onabort = () => rej(t.error || new Error("保存が中断されました"));
     });
   },
   put(rec){ return this.tx("readwrite", s => s.put(rec)) },
@@ -145,35 +155,72 @@ function shrink(file, max=1600, q=0.72){
    つながらないときは端末に残し、つながったときに送る（送れていない間は「未送信」と出す）。
    撮り直し・削除で要らなくなった写真はドライブのゴミ箱へ（送れないときは、あとで送る）。 */
 let SHOTS = new Set();                 /* この端末にある、自分の写真のキー */
+/* 写真の控えは「持ち主|写真のキー」で保存し、読むときも持ち主を確かめる（同じ端末の別の人の写真と混ざらない） */
+const shotKey = (id, owner) => (owner || ME.email) + "|" + id;
+const IMG_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+\/=]+$/;
+async function shotGet(id){
+  if(!id || !ME.email) return null;
+  const r = await IDB.get(shotKey(id)).catch(() => null);
+  return (r && r.owner === ME.email && IMG_RE.test(String(r.data))) ? Object.assign({}, r, {id: r.rid}) : null;
+}
+async function shotAll(owner){
+  const who = owner || ME.email;
+  return (await IDB.all()).filter(r => r && r.owner === who && r.rid).map(r => Object.assign({}, r, {id: r.rid}));
+}
+function shotDel(id, owner){ SHOTS.delete(id); return IDB.del(shotKey(id, owner)).catch(()=>{}) }
 async function refreshShots(){
-  try{ SHOTS = new Set((await IDB.all()).filter(r => r && r.data && (!r.owner || r.owner === ME.email)).map(r => r.id)) }
-  catch(e){ SHOTS = new Set() }
-}
-async function putShot(rec){
-  rec.owner = ME.email;
-  await IDB.put(rec); SHOTS.add(rec.id);
-}
-async function uploadShot(rec, date, recId){
   try{
-    const r = await api("uploadReceipt", {data: String(rec.data).split(",")[1] || "", date, recId});
-    if(!r.ok) return null;
-    rec.driveId = r.fileId; rec.name = r.name;
-    await putShot(rec);
-    return r.fileId;
-  }catch(e){ return null }
+    /* 前の形（キーに持ち主がない）の控えは、持ち主が自分なら新しいキーへ移す */
+    for(const r of await IDB.all()){
+      if(r && r.id && !String(r.id).includes("|") && r.owner === ME.email){
+        await IDB.put(Object.assign({}, r, {id: shotKey(r.id), rid: r.id}));
+        await IDB.del(r.id);
+      }
+    }
+    SHOTS = new Set((await shotAll()).filter(r => r.data).map(r => r.id));
+  }catch(e){ SHOTS = new Set() }
+}
+/* owner を渡したときは、その人の控えとして保存する（送っている間に人が替わっても取り違えない） */
+async function putShot(rec, owner){
+  const who = owner || ME.email;
+  if(!who || !IMG_RE.test(String(rec.data))) throw new Error("写真の形が正しくありません");
+  await IDB.put(Object.assign({}, rec, {id: shotKey(rec.id, who), rid: rec.id, owner: who}));
+  if(who === ME.email) SHOTS.add(rec.id);
+}
+/* 同じ写真を2回送らない（送っている途中なら、その結果を待つ） */
+const UPLOADING = new Map();
+function uploadShot(rec, date, recId){
+  const owner = ME.email, key = owner + "|" + rec.id;
+  if(UPLOADING.has(key)) return UPLOADING.get(key);
+  const p = (async () => {
+    try{
+      const cur = await shotGet(rec.id);
+      if(cur && cur.driveId) return cur.driveId;
+      const r = await api("uploadReceipt", {data: String(rec.data).split(",")[1] || "", date, recId});
+      if(!r.ok || ME.email !== owner) return null;
+      rec.driveId = r.fileId; rec.name = r.name;
+      await putShot(rec, owner);
+      return r.fileId;
+    }catch(e){ return null }
+    finally{ UPLOADING.delete(key) }
+  })();
+  UPLOADING.set(key, p);
+  return p;
 }
 function trashLater(fileId){
   if(!fileId) return;
   const q = LS.get("trashQ", []);
   if(q.indexOf(fileId) < 0) q.push(fileId);
-  LS.set("trashQ", q); drawPend(); pumpPhotos();
+  LS.set("trashQ", q); drawPend();
+  /* 台帳の保存（saveD）は呼んだ側がこのあとすぐ行うので、その後に回す。保存が終わるまでは送らない（pumpPhotos が待つ） */
+  setTimeout(pumpPhotos, 0);
 }
 /* 撮ったが記録に使わなかった写真を片づける */
 async function discardShot(id){
   if(!id) return;
-  const rec = await IDB.get(id).catch(() => null);
+  const rec = await shotGet(id);
   if(rec && rec.driveId) trashLater(rec.driveId);
-  IDB.del(id).catch(()=>{}); SHOTS.delete(id);
+  shotDel(id);
 }
 const unsentShots = () => (D.entries||[]).filter(e => e.receiptId && !e.photoId && SHOTS.has(e.receiptId));
 
@@ -182,15 +229,16 @@ async function pumpPhotos(){
   if(PUMP_BUSY || !ME.email || !navigator.onLine) return;
   PUMP_BUSY = true;
   try{
+    /* 台帳の保存が終わってから送る（GAS もドライブの台帳でまだ使っている写真は消さない） */
     const q = LS.get("trashQ", []);
-    while(q.length){
+    while(q.length && !DIRTY && !SYNC_BUSY && !SYNC_TIMER){
       const r = await api("trashReceipt", {fileId:q[0]}).catch(() => null);
       if(!r || (!r.ok && r.code !== "FORBIDDEN")) break;
       q.shift(); LS.set("trashQ", q);
     }
     let sent = 0;
     for(const e of unsentShots()){
-      const rec = await IDB.get(e.receiptId).catch(() => null);
+      const rec = await shotGet(e.receiptId);
       if(!rec || !rec.data) continue;
       const fid = rec.driveId || await uploadShot(rec, e.date, e.id);
       if(!fid) break;
@@ -233,6 +281,8 @@ function ocrDate(v){
   const p = w ? [2018 + (+w[1]), +w[2], +w[3]] : g ? [+g[1], +g[2], +g[3]] : null;
   if(!p || p[1] < 1 || p[1] > 12 || p[2] < 1 || p[2] > 31) return null;
   if(p[0] < 2000 || p[0] > 2100) return null;
+  const dt = new Date(p[0], p[1] - 1, p[2]);
+  if(dt.getMonth() !== p[1] - 1 || dt.getDate() !== p[2]) return null;     /* 2月31日などは読まない */
   return p[0] + "-" + String(p[1]).padStart(2,"0") + "-" + String(p[2]).padStart(2,"0");
 }
 
@@ -241,18 +291,22 @@ async function ocrRun(){
   if(OCR.busy) return;
   if(!REC.receiptId){ OCR = {busy:false, msg:"先に写真を撮る・選んでください。", file:""}; drawRec(); return }
 
-  const rec = await IDB.get(REC.receiptId).catch(() => null);
+  const ticket = REC, rid = REC.receiptId, owner = ME.email;
+  const stale = () => REC !== ticket || REC.receiptId !== rid || ME.email !== owner;
+  const rec = await shotGet(REC.receiptId);
   let fid = (rec && rec.driveId) || (REC.receiptId === REC.origReceiptId ? REC.origPhotoId : null);
   if(!fid){
     if(!rec || !rec.data){ OCR = {busy:false, msg:"写真を読み出せませんでした。", file:""}; drawRec(); return }
     OCR = {busy:true, msg:"写真をドライブへ送っています…", file:""}; drawRec();
     fid = await uploadShot(rec, REC.date, REC.id || REC.pid);
+    if(stale()){ OCR.busy = false; return }
     if(!fid){ OCR = {busy:false, msg:"写真をドライブへ送れませんでした。電波のよい場所で、もう一度押してください。", file:""}; drawRec(); return }
   }
 
   OCR = {busy:true, msg:"領収書を読み取っています。10秒ほどかかります…", file:""}; drawRec();
   let res;
   try{ res = await api("ocr", {fileId:fid}) }catch(e){ res = {ok:false, message:e.message} }
+  if(stale()){ OCR = {busy:false, msg:"", file:""}; if(REC) drawRec(); return }
   const name = res.fileName || (rec && rec.name) || "";
   if(res.ok && res.history){
     OCR = {busy:false, file:name, history: historyRows(res.history), card: res.history.card || "",
@@ -308,8 +362,9 @@ function histDate(s){
   const m = t.match(/^(\d{1,2})[\/\-.月](\d{1,2})日?$/);
   if(!m) return null;
   const now = today(), y = +now.slice(0,4);
-  const d = `${y}-${String(+m[1]).padStart(2,"0")}-${String(+m[2]).padStart(2,"0")}`;
-  return d > now ? `${y-1}${d.slice(4)}` : d;
+  const d = ocrDate(`${y}-${+m[1]}-${+m[2]}`);
+  if(!d) return null;
+  return d > now ? (ocrDate(`${y-1}-${+m[1]}-${+m[2]}`) || null) : d;
 }
 const routeOf = r => [r.from, r.to].filter(Boolean).join("→");
 function historyRows(h){
@@ -1414,7 +1469,7 @@ function saveRec(){
     ans: Object.assign({}, REC.ans)};
   /* 撮り直した・外した写真は、保存したときに片づける（やめたときは元の写真が残る） */
   if(wasEdit && REC.origReceiptId && !keepPhoto && !photoShared(REC.origReceiptId, REC.origPhotoId, REC.id)){
-    IDB.del(REC.origReceiptId).catch(()=>{}); SHOTS.delete(REC.origReceiptId);
+    shotDel(REC.origReceiptId);
     trashLater(REC.origPhotoId);
   }
   const i = D.entries.findIndex(x=>x.id===row.id);
@@ -1440,7 +1495,7 @@ async function showEntryPhoto(host, e, small, other, onDel){
     if(onDel){ const b = el(`<button class="ghost" style="margin-left:8px;padding:6px 10px;font-size:12px">外す</button>`); b.onclick = onDel; host.appendChild(b); }
   };
   if(!other && key){
-    const rec = await IDB.get(key).catch(() => null);
+    const rec = await shotGet(key);
     if(rec && rec.data){ put(rec.data); return }
   }
   if(!e.photoId) return;
@@ -1452,6 +1507,7 @@ async function showEntryPhoto(host, e, small, other, onDel){
     const r = await api("receiptImage", {fileId:e.photoId}).catch(err => ({ok:false, message:err.message}));
     if(!r.ok){ b.textContent = "写真"; b.disabled = false; say(r.message || "写真を受け取れませんでした。"); return }
     const data = "data:" + (r.mimeType || "image/jpeg") + ";base64," + r.data;
+    if(!IMG_RE.test(data)){ b.textContent = "写真"; b.disabled = false; say("写真の形が正しくありません。"); return }
     if(!other) await putShot({id:key, data, size:data.length, at:today(), driveId:e.photoId}).catch(()=>{});
     put(data); lightbox(data);
   };
@@ -1497,9 +1553,13 @@ function drawLedger(){
     };
     li.querySelector('[data-a=del]').onclick = async () => {
       if(!await ask("この記録を削除します。もとに戻せません。","削除する")) return;
-      if(!photoShared(e.receiptId, e.photoId, e.id)){
-        if(e.receiptId){ IDB.del(e.receiptId).catch(()=>{}); SHOTS.delete(e.receiptId) }
-        trashLater(e.photoId);
+      /* 一覧を描いたあとに写真が送り終わっていることがあるので、今の台帳の行と控えの写真から写真のIDを取る */
+      const cur = D.entries.find(x => x.id === e.id) || e;
+      const shot = cur.receiptId ? await shotGet(cur.receiptId) : null;
+      const pid = cur.photoId || (shot && shot.driveId) || null;
+      if(!photoShared(cur.receiptId, pid, cur.id)){
+        if(cur.receiptId) shotDel(cur.receiptId);
+        trashLater(pid);
       }
       dropRow("entries", e.id); saveD(); drawLedger();
     };
@@ -2009,7 +2069,8 @@ function drawTaxBody(){
 }
 
 /* ── CSV ── */
-const q = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
+/* 表計算ソフトで数式として動かないよう、= + - @ などで始まる文字には ' を付ける */
+const q = v => { let t = String(v==null?"":v); if(/^[=+\-@\t\r]/.test(t)) t = "'" + t; return `"${t.replace(/"/g,'""')}"` };
 const csvKamoku = y => {
   const ks = kamokuSum(y);
   return ["科目,金額,決算書の記入欄",
@@ -2080,7 +2141,7 @@ function openSalary(pre){
   acts.appendChild(ok); acts.appendChild(ng); box.appendChild(acts);
   if(pre && pre.id){
     const del = el(`<button class="ghost" style="margin-top:10px;width:100%">この年の給与を消す</button>`);
-    del.onclick = () => { D.salary = D.salary.filter(s=>+s.year!==YEAR); saveD(); drawTax(); };
+    del.onclick = () => { D.salary.filter(s=>+s.year===YEAR).forEach(s=>dropRow("salary", s.id)); saveD(); drawTax(); };
     box.appendChild(del);
   }
   window.scrollTo({top:0,behavior:"instant"});
@@ -2501,7 +2562,7 @@ function drawIncome(){
     <div class="seg"><button data-v="y" aria-pressed="${!!sal}">ある</button><button data-v="n" aria-pressed="${!sal}">ない</button></div></div>`);
   has.querySelectorAll("button").forEach(b=>{
     b.onclick = () => {
-      if(b.dataset.v==="n"){ D.salary = D.salary.filter(s=>+s.year!==YEAR); saveD(); drawIncome(); drawTax() }
+      if(b.dataset.v==="n"){ D.salary.filter(s=>+s.year===YEAR).forEach(s=>dropRow("salary", s.id)); saveD(); drawIncome(); drawTax() }
       else if(!sal){ D.salary.push({id:uid(), year:YEAR, payment:0, withheld:0, shakai:0, afterD:0}); saveD(); drawIncome() }
     };
   });
@@ -2527,7 +2588,7 @@ function drawIncome(){
 }
 async function drawStore(){
   let n = 0, bytes = 0;
-  try{ const all = (await IDB.all()).filter(r => r && r.data && (!r.owner || r.owner === ME.email)); n = all.length; bytes = all.reduce((s,r)=>s+(r.size||0),0) }catch(e){}
+  try{ const all = (await shotAll()).filter(r => r.data); n = all.length; bytes = all.reduce((s,r)=>s+(r.size||0),0) }catch(e){}
   const onDrive = D.entries.filter(e => e.photoId).length, unsent = unsentShots().length;
   $("storeInfo").innerHTML =
     `<div class="kv"><span>経費の記録</span><b>${D.entries.length} 件</b></div>
@@ -2623,6 +2684,7 @@ const GAS_URL_RE = /^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s
 const IS_LOCAL = location.hostname === "localhost" || location.hostname === "127.0.0.1";
 const DEV = IS_LOCAL && !!CONFIG.devIdToken;             /* 手元の模擬環境だけ */
 let API_URL = "", ID_TOKEN = "", TOKEN_WAITERS = [];
+let SESSION = 0, INFLIGHT = 0, ENTERING = false;            /* SESSION＝ログインごとの番号、INFLIGHT＝GAS とやり取り中の数 */
 const store = {
   get(k){ try{ return localStorage.getItem(k) || "" }catch(e){ return "" } },
   set(k,v){ try{ v ? localStorage.setItem(k,v) : localStorage.removeItem(k) }catch(e){} },
@@ -2638,6 +2700,12 @@ function validApiUrl(u){
   return GAS_URL_RE.test(u);
 }
 function loadApiUrl(){
+  /* 本番は config.js の apiUrl だけを使う。リンクの ?api= では差し替えない（偽の GAS にログインを送らせない） */
+  if(CONFIG.apiUrl && !IS_LOCAL){
+    API_URL = GAS_URL_RE.test(CONFIG.apiUrl) ? CONFIG.apiUrl : "";
+    try{ if(location.search) history.replaceState(null, "", location.pathname) }catch(e){}
+    return;
+  }
   const fromLink = new URLSearchParams(location.search).get("api");
   if(fromLink && validApiUrl(fromLink)){
     store.set(API_STORE, fromLink);
@@ -2675,7 +2743,7 @@ function onCredential(res){
   TOKEN_WAITERS.splice(0).forEach(w => w(ID_TOKEN));
   const p = decodeJwt(ID_TOKEN) || {};
   const email = String(p.email || "").toLowerCase();
-  if(!ME.email || (email && email !== ME.email)) enterApp();          /* 初めて／別の人 */
+  if(!ENTERING && (!ME.email || (email && email !== ME.email))) enterApp();   /* 初めて／別の人（確かめている途中なら待つ） */
   else if(!$("view-login").hidden){ showView("main"); syncNow(false); pumpPhotos() }
 }
 function initGoogle(){
@@ -2718,33 +2786,48 @@ function authLost(message, code){
 }
 
 /* ═══════════════ GAS とのやり取り ═══════════════ */
+/* GAS へ送る。送り始めたときの人（expect）とログインの番号を覚え、途中で人が替わったら結果を捨てる */
 async function api(action, params){
   if(!API_URL) throw Object.assign(new Error("設定用リンクから開き直してください。"), {code:"SETUP"});
   if(!navigator.onLine) throw Object.assign(new Error("電波がありません。"), {code:"NET"});
-  let idToken;
-  try{ idToken = await freshToken() }
-  catch(e){ authLost(e.message, "AUTH"); throw e }
-  let res;
+  /* anyUser＝ログインした人を確かめる読み込み（人の切り替えのとき）。だれの操作として送るかを決めない */
+  const anyUser = !!(params && params.anyUser);
+  if(anyUser){ params = Object.assign({}, params); delete params.anyUser }
+  const gen = SESSION, owner = anyUser ? "" : ME.email;
+  const stale = () => Object.assign(new Error("ログインしている人が替わりました。"), {code:"STALE"});
+  INFLIGHT++;
   try{
-    res = await fetch(API_URL, {
-      method:"POST",
-      /* text/plain にすると事前確認（プリフライト）が出ず、GAS がそのまま受け取れる */
-      headers:{"Content-Type":"text/plain;charset=utf-8"},
-      body: JSON.stringify(Object.assign({action, idToken}, params || {})),
-      redirect:"follow",
-    });
-  }catch(e){ throw Object.assign(new Error("GAS から応答がありません。"), {code:"NET"}) }
-  let j;
-  try{ j = await res.json() }
-  catch(e){ throw Object.assign(new Error("GAS の応答を読めませんでした（HTTP " + res.status + "）。"), {code:"NET"}) }
-  if(!j.ok && (j.code === "AUTH" || j.code === "DENIED")) authLost(j.message, j.code);
-  return j;
+    let idToken;
+    try{ idToken = await freshToken() }
+    catch(e){ if(gen === SESSION) authLost(e.message, "AUTH"); throw e }
+    if(gen !== SESSION) throw stale();
+    const tok = decodeJwt(idToken);
+    if(owner && tok && tok.email && String(tok.email).toLowerCase() !== owner) throw stale();
+    let res;
+    try{
+      res = await fetch(API_URL, {
+        method:"POST",
+        /* text/plain にすると事前確認（プリフライト）が出ず、GAS がそのまま受け取れる */
+        headers:{"Content-Type":"text/plain;charset=utf-8"},
+        body: JSON.stringify(Object.assign({action, idToken, expect: owner}, params || {})),
+        redirect:"follow",
+      });
+    }catch(e){ throw Object.assign(new Error("GAS から応答がありません。"), {code:"NET"}) }
+    let j;
+    try{ j = await res.json() }
+    catch(e){ throw Object.assign(new Error("GAS の応答を読めませんでした（HTTP " + res.status + "）。"), {code:"NET"}) }
+    if(gen !== SESSION) throw stale();
+    if(!j.ok && (j.code === "AUTH" || j.code === "DENIED")) authLost(j.message, j.code);
+    return j;
+  }finally{ INFLIGHT-- }
 }
 function driveErr(e){
   const c = e && e.code;
   if(c === "AUTH")   return "ログインが切れました。ログインし直してください。";
   if(c === "DENIED") return "このアカウントでは使えません。" + ((e && e.message) || "");
   if(c === "NET")    return "GAS から応答がありません。電波を確かめてください。記録はこの端末に残っていて、つながったときに送ります。";
+  if(c === "AUTH_UNAVAILABLE") return "ログインを確かめる Google のサービスに届きませんでした。記録はこの端末に残っていて、あとで送ります。";
+  if(c === "LIMIT")  return (e && e.message) || "今日の上限に達しました。";
   if(c === "SETUP")  return "GAS の URL が設定されていません。設定用リンクから開き直してください。";
   return "ドライブとやり取りできませんでした。" + ((e && e.message) || "");
 }
@@ -2777,7 +2860,8 @@ async function syncNow(fromUser){
     if(r.role && r.role !== ME.role){ ME.role = r.role; rememberMe(); applyRole() }
     const res = applyServer(r.ledger);
     MINE_LOOP = res.mine ? MINE_LOOP + 1 : 0;
-    if(res.mine && MINE_LOOP <= 3) DIRTY = true;
+    if(res.mine) DIRTY = true;                    /* 送り直しが要る（差が残る間は「未送信」のまま） */
+    if(r.recovered) say("ドライブの最新の台帳が読めなかったため、1つ前の保存を使いました。直近の変更が抜けていないか確かめてください。");
     if(sending) LS.set("driveAt", new Date().toISOString());
     LS.set("dirty", DIRTY);
     ONLINE_OK = true; DRIVE_ERR = "";
@@ -2786,12 +2870,16 @@ async function syncNow(fromUser){
     return true;
   }catch(e){
     if(ME.email === owner){ DIRTY = DIRTY || sending; LS.set("dirty", DIRTY) }
+    if(e && e.code === "STALE") return false;
     ONLINE_OK = false; DRIVE_ERR = driveErr(e);
     if(fromUser) say(sending ? "保存できませんでした。" : "読み込めませんでした。");
     return false;
   }finally{
     SYNC_BUSY = false; drawPend(); drawDriveMsg();
-    if(DIRTY && ONLINE_OK && !SYNC_TIMER) SYNC_TIMER = setTimeout(() => { SYNC_TIMER = null; syncNow(false) }, 1500);
+    /* 何度送っても合わない差が残るときは、自動で送り続けない（「未送信」のまま残し、ログアウトで消さない） */
+    if(DIRTY && ONLINE_OK && !SYNC_TIMER && MINE_LOOP <= 3) SYNC_TIMER = setTimeout(() => { SYNC_TIMER = null; syncNow(false) }, 1500);
+    if(MINE_LOOP > 3){ DRIVE_ERR = "ドライブの台帳と合わせられない差が残っています。管理者に知らせてください。"; drawDriveMsg() }
+    if(!DIRTY) pumpPhotos();
   }
 }
 /* ドライブから届いた内容で画面を描き直す（入力中のフォームは描き直さない） */
@@ -2866,7 +2954,7 @@ $("repFile").onchange = e => { const f = e.target.files; repUpload(f); e.target.
 /* ── バックアップ ── */
 $("saveBackup").onclick = async b => {
   let shots = [];
-  try{ shots = (await IDB.all()).filter(r => r && r.data && (!r.owner || r.owner === ME.email)).map(({owner, ...r}) => r) }catch(e){}
+  try{ shots = (await shotAll()).filter(r => r.data).map(({owner, rid, ...r}) => r) }catch(e){}
   saveFile(fname(YEAR, "バックアップ_"+today(), "json"),
     JSON.stringify({v:2, at:new Date().toISOString(), settings:S, data:D, receipts:shots}, null, 1), b.target);
 };
@@ -2877,12 +2965,16 @@ $("backupFile").onchange = async e => {
     const j = JSON.parse(await f.text());
     if(!j || !j.data) throw new Error("形式が違います");
     if(!await ask("取り込むと、いまの台帳に追加されます。同じ記録が二重に入ることはありません。写真はドライブに送ります。","取り込む")) return;
+    /* 取り込む中身も形をそろえる（数値・文字・id）。ドライブの写真の参照は持ち主が分からないので引き継がず、写真は送り直す */
+    const src = Ledger.norm(j.data);
     ROWK.forEach(k=>{
-      (j.data[k]||[]).forEach(r=>{ if(r && r.id && !D[k].some(x=>x.id===r.id)) D[k].push(r) });
+      src[k].forEach(r=>{ if(!D[k].some(x=>x.id===r.id)){ if(k === "entries") r.photoId = null; D[k].push(r) } });
     });
-    MAPK.forEach(k=>{ Object.assign(D[k], j.data[k]||{}) });
+    MAPK.forEach(k=>{ Object.assign(D[k], src[k]) });
     if(!isAdmin()) Ledger.stripAdminOnly(D);
-    for(const r of (j.receipts||[])){ try{ if(r && r.id && r.data) await putShot(Object.assign({}, r)) }catch(err){} }
+    for(const r of (Array.isArray(j.receipts) ? j.receipts : [])){
+      try{ if(r && Ledger.ID_RE.test(String(r.id)) && IMG_RE.test(String(r.data))) await putShot({id:String(r.id), data:r.data, w:+r.w||0, h:+r.h||0, size:String(r.data).length, at:String(r.at||"").slice(0,10)}) }catch(err){}
+    }
     saveD(); drawYears(); drawStore(); drawPend();
     pumpPhotos();
     say("取り込みました。");
@@ -3071,9 +3163,12 @@ function renderUsers(r){
 }
 
 /* ═══════════════ 起動・人の切り替え・閉じる ═══════════════ */
-function rememberMe(){ store.set(LAST_KEY, JSON.stringify(ME)) }
+/* 最後にログインできた人と時刻。電波がないときだけ、24時間以内ならこの人の控えで開く */
+const OFFLINE_MS = 24 * 3600 * 1000;
+function rememberMe(){ store.set(LAST_KEY, JSON.stringify(Object.assign({}, ME, {at: Date.now()}))) }
 /* その人の控え（台帳・写真）で画面を開く */
 function openUser(who){
+  SESSION++;
   ME = {email:String(who.email||"").toLowerCase(), name:who.name||"", role:who.role||"user"};
   resetState(LS.get("settings", {}), LS.get("data", {}));
   DIRTY = !!LS.get("dirty", false);
@@ -3090,16 +3185,23 @@ async function enterApp(){
   const p = decodeJwt(ID_TOKEN) || {};
   let last = null; try{ last = JSON.parse(store.get(LAST_KEY) || "null") }catch(e){}
   const email = String(p.email || "").toLowerCase();
-  if(last && last.email && (!email || last.email === email) && ME.email !== last.email) openUser(last);   /* 控えがあれば先に出す */
-  if(!ME.email) busy("読み込んでいます…");
+  /* 電波がないときだけ、24時間以内にログインした人の控えで先に開く。電波があればログインを確かめてから出す */
+  if(!navigator.onLine && last && last.email && (!email || last.email === email) && Date.now() - (+last.at || 0) < OFFLINE_MS && ME.email !== last.email){
+    openUser(last); ONLINE_OK = false; DRIVE_ERR = "電波がないため、前回のログインのまま開いています。"; drawDriveMsg();
+    return;
+  }
+  if(!ME.email) busy("ログインを確かめています…");
   let r;
-  try{ r = await api("load") }catch(e){ r = {ok:false, code:e.code || "NET", message:e.message} }
+  ENTERING = true;
+  try{ r = await api("load", {anyUser:true}) }catch(e){ r = {ok:false, code:e.code || "NET", message:e.message} }
+  finally{ ENTERING = false }
   idle();
   if(!r.ok){
-    if(r.code === "AUTH" || r.code === "DENIED") return;
+    if(r.code === "AUTH" || r.code === "DENIED" || r.code === "STALE") return;
     if(ME.email){ ONLINE_OK = false; DRIVE_ERR = driveErr(r); drawDriveMsg(); drawPend(); return }
     showView("login"); loginMsg(driveErr(r)); return;
   }
+  if(r.recovered) say("ドライブの最新の台帳が読めなかったため、1つ前の保存を使いました。直近の変更が抜けていないか確かめてください。");
   const who = {email:r.email, name:r.name, role:r.role};
   const fresh = ME.email !== who.email;
   if(fresh) openUser(who);
@@ -3121,17 +3223,24 @@ async function enterApp(){
 async function logout(){
   if(!await ask("閉じます（ログアウト）。まだ送っていない記録と写真を送ってから、この端末の控え（台帳と写真）を消します。次に開いたときはログインからです。","閉じる")) return;
   busy("ドライブへ送っています…");
-  while(SYNC_BUSY || PUMP_BUSY) await sleep(300);
+  /* やり取り中の処理（写真の送信・読み取りなど）が終わるのを待つ（最大30秒） */
+  for(let i = 0; i < 100 && (SYNC_BUSY || PUMP_BUSY || INFLIGHT); i++) await sleep(300);
   if(DIRTY || SYNC_TIMER) await syncNow(false);
   await pumpPhotos();
-  const left = (DIRTY ? 1 : 0) + unsentShots().length + LS.get("trashQ", []).length;
+  const left = (DIRTY ? 1 : 0) + unsentShots().length + LS.get("trashQ", []).length + (INFLIGHT ? 1 : 0);
   idle();
   if(left){
     say("未送信があります。電波のよい場所で、もう一度「閉じる」を押してください。端末の控えは消していません。");
     drawPend(); return;
   }
+  const gone = ME.email;
+  SESSION++;                                   /* これより後に届く古い応答は、すべて捨てる */
   ["data","settings","dirty","driveAt","trashQ"].forEach(k => LS.del(k));
-  try{ for(const r of await IDB.all()){ if(r && (!r.owner || r.owner === ME.email)) await IDB.del(r.id) } }catch(e){}
+  let leftShots = 0;
+  try{
+    for(const r of await IDB.all()){ if(r && r.owner === gone) await IDB.del(r.id) }
+    leftShots = (await IDB.all()).filter(r => r && r.owner === gone).length;
+  }catch(e){ leftShots = -1 }
   store.set(LAST_KEY, "");
   setToken("");
   try{ google.accounts.id.disableAutoSelect() }catch(e){}
@@ -3140,7 +3249,8 @@ async function logout(){
   SHOTS = new Set(); DIRTY = false; REC = null; PEEK = null;
   Object.keys(OTHERS).forEach(k => delete OTHERS[k]);
   showView("login");
-  loginMsg("閉じました。アプリを閉じるときは、スマホの操作で閉じてください。");
+  loginMsg(leftShots === 0 ? "閉じました。アプリを閉じるときは、スマホの操作で閉じてください。"
+    : "閉じましたが、この端末の写真の控えを消しきれませんでした。ブラウザの設定から、このサイトのデータを消してください。");
 }
 $("logout").onclick = logout;
 
@@ -3163,7 +3273,7 @@ function boot(){
   if(!API_URL){ showView("setup"); return }
   setToken(sess.get(TOKEN_KEY));
   let last = null; try{ last = JSON.parse(store.get(LAST_KEY) || "null") }catch(e){}
-  if(DEV || tokenValid(ID_TOKEN) || (last && last.email)) enterApp();     /* 控えがあれば電波がなくても開く */
+  if(DEV || tokenValid(ID_TOKEN) || (last && last.email)){ showView("login"); loginMsg("ログインを確かめています…"); enterApp() }
   else showView("login");
   let tries = 0;
   (function waitGoogle(){
