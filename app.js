@@ -446,11 +446,13 @@ const fname = (year, kind, ext) => `${safeName(S.exportName)}_${year}_${kind}.${
    そのときは共有メニュー（「ファイルに保存」など）にファイルを渡す。どちらもだめならコピーする。 */
 const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const IS_STANDALONE = (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
+/* text が文字ではなくバイト列（Uint8Array）のときは、そのまま保存する（Shift_JIS の CSV など） */
 async function saveFile(filename, text, btn){
   const label = btn ? btn.textContent : null;
   const flash = m => { if(btn){ btn.textContent = m; setTimeout(()=>btn.textContent = label, 2200); } };
+  const bytes = typeof text !== "string";
   // Excelで文字化けしないよう BOM を付ける
-  const body = /\.csv$/i.test(filename) ? "﻿" + text : text;
+  const body = bytes ? text : /\.csv$/i.test(filename) ? "﻿" + text : text;
   const type = /\.csv$/i.test(filename) ? "text/csv" : "application/json";
   if(IS_IOS && IS_STANDALONE && navigator.canShare){
     try{
@@ -465,6 +467,7 @@ async function saveFile(filename, text, btn){
     setTimeout(() => URL.revokeObjectURL(url), 10000);
     flash("保存しました"); return;
   }catch(e){ /* 下でコピーを試す */ }
+  if(bytes){ flash("保存できませんでした"); return }
   try{ await navigator.clipboard.writeText(text); flash("コピーしました"); }
   catch(err){ flash("保存もコピーもできませんでした"); }
 }
@@ -2105,6 +2108,19 @@ function drawTaxBody(){
   mk("投資の損益",     b => saveFile(fname(y,"投資損益"),     csvInvest(y), b));
   box.appendChild(btns);
   box.appendChild(el(`<p class="lede" style="margin-top:10px">ファイル名は <span style="font-family:var(--mono)">${esc(safeName(S.exportName))}_${y}_○○.csv</span> になります。名前は<b>基本項目</b>タブで変えられます。保存先はブラウザの既定のダウンロード先です。iPhone のホーム画面から開いているときは、共有メニューが出るので「ファイルに保存」を選んでください。${multi?"経費の明細には「記録した人」の列が付きます。":""}</p>`));
+  mfButtons(box, y, "マネーフォワード用");
+}
+/* マネーフォワードに取り込む仕訳の CSV。まず Shift_JIS 版、文字化けしたら UTF-8 版 */
+function mfButtons(box, y, label){
+  const j = mfJournal(y);
+  box.appendChild(el(`<h2 class="sec">マネーフォワードに取り込む</h2>`));
+  const btns = el(`<div style="display:flex;gap:8px;flex-wrap:wrap"></div>`);
+  const mk = (t, fn) => { const b = el(`<button class="ghost">${t}</button>`); b.onclick = () => fn(b); btns.appendChild(b); };
+  mk(label,               b => saveFile(fname(y,"MF仕訳帳"),       toSjis(csvMF(y)), b));
+  mk(label + "（UTF-8）", b => saveFile(fname(y,"MF仕訳帳_UTF8"), csvMF(y), b));
+  box.appendChild(btns);
+  box.appendChild(el(`<p class="lede" style="margin-top:10px">マネーフォワード クラウド（確定申告・会計）の「会計帳簿」→「仕訳帳」→「インポート」→「仕訳帳」で取り込む CSV です。この年の仕訳は <b>${j.count}件</b>。判定が×の記録と、経費にしない記録（${j.skipped.length}件）は入りません。<br>
+    <b>同じファイルを2回取り込むと二重になります。</b>カードや口座をマネーフォワードに連携しているときは、同じ支払いが二重にならないよう気をつけてください。取り込んだ仕訳にはタグ「経費判定君」が付きます。文字化けしたときは UTF-8 のほうを使ってください。</p>`));
 }
 
 /* ── CSV ── */
@@ -2124,6 +2140,97 @@ const csvLedger = (y, withWho) => {
     .map(e=>[q(e.date),q(e.kamoku),q(e.payee),q(e.memo),e.amount,e.ratio,e.biz||0,
       q({ok:"可",warn:"条件付",ng:"否認リスク"}[e.verdict]||""),q(e.receiptId||e.photoId?"あり":"なし")].concat(who ? [q(e.who)] : []).join(","))].join("\r\n");
 };
+/* ── マネーフォワード クラウド（確定申告・会計）の「仕訳帳(CSVファイル)のインポート」用 ──
+   列は公式ガイドの項目リスト（import-books/ib01.html）の並び。決まりの説明＝連携_マネーフォワード/形式.md
+   手元のスクリプト make_mf_csv.py と同じ仕訳を作る（直すときは両方を直す） */
+const MF_HEAD = ["取引No","取引日","借方勘定科目","借方補助科目","借方部門","借方取引先","借方税区分","借方インボイス",
+  "借方金額(円)","借方税額","貸方勘定科目","貸方補助科目","貸方部門","貸方取引先","貸方税区分","貸方インボイス",
+  "貸方金額(円)","貸方税額","摘要","仕訳メモ","タグ","MF仕訳タイプ","決算整理仕訳","作成日時","作成者","最終更新日時","最終更新者"];
+const MF_TAG = "経費判定君";
+/* 法人は、青色申告決算書の科目名を法人の一般的な科目名に直す。MF に無い名前は、取り込みのとき追加か変換を選べる */
+const MF_HOJIN = {"接待交際費":"交際費","外注工賃":"外注費","利子割引料":"支払利息","損害保険料":"保険料","給料賃金":"給料手当","貸倒金":"貸倒損失"};
+/* MF は「"」と改行があると読めないので外す。字数の上限で切る */
+const mfText = (s, n) => String(s==null?"":s).replace(/"/g,"”").replace(/[\r\n]/g," ").trim().slice(0, n);
+function mfCredit(e){
+  const pay = (e.ans||{}).pay;
+  if(isHojin()){
+    if(pay==="card") return ["未払金","法人カード"];
+    if(pay==="bank") return ["普通預金",""];
+    return ["未払金", e.who || "立替"];            // 立て替えた人（あとで精算）
+  }
+  if(pay==="card") return ["未払金","事業用カード"];
+  if(pay==="bank") return ["普通預金",""];
+  return ["事業主借",""];                            // 現金・個人カード・支払方法なし
+}
+/* インボイスの列。本則課税で、適格請求書がなく、1万円以上のときだけ経過措置（1万円未満は少額特例） */
+function mfInvoice(e){
+  if(S.shohi!=="honsoku" || (e.ans||{}).doc==="invoice" || (+e.amount||0) < 10000) return "";
+  return e.date < "2026-10-01" ? "80％控除" : "70％控除";
+}
+function mfJournal(y){
+  const rows = [], skipped = [];
+  let no = 0;
+  allEntries(y).slice().sort((a,b)=> a.date<b.date?-1 : a.date>b.date?1 : a.id<b.id?-1 : a.id>b.id?1 : 0).forEach(e => {
+    const k = e.kamoku, amt = Math.round(+e.amount||0);
+    let biz = Math.round(+(e.biz==null?e.amount:e.biz)||0), dr = k;
+    if(e.verdict==="ng"){ skipped.push(e); return }
+    if(k==="経費にしない（資産に計上）"){ dr = e.catName==="PC・機材" ? "工具器具備品" : "開業費"; biz = amt }
+    else if(String(k).startsWith("経費にしない")){ skipped.push(e); return }
+    else if(isHojin()) dr = MF_HOJIN[k] || k;
+    if(amt<=0 || biz<=0){ skipped.push(e); return }
+    no++;
+    const mark = {ok:"○",warn:"△",ng:"×"}[e.verdict]||"";
+    let memo = `${MF_TAG} ${e.id} 判定${mark}`;
+    if(biz!==amt) memo += ` 按分${e.ratio}%（総額${amt}円・事業分${biz}円）`;   // CSV なので桁区切りのカンマは付けない
+    if(isHojin() || hasOthers(y)) memo += ` 利用者:${e.who||""}`;
+    const base = {"取引No":no, "取引日":e.date.replace(/-/g,"/"),
+      "摘要":mfText([e.payee,e.memo].filter(x=>x&&x!=="—").join(" "),200), "仕訳メモ":mfText(memo,200), "タグ":MF_TAG};
+    let cr, sub = "";
+    if(k==="減価償却費"){ cr = /開業費/.test(e.memo||"") ? "開業費" : "工具器具備品"; base["決算整理仕訳"] = "1" }
+    else [cr, sub] = mfCredit(e);
+    const inv = mfInvoice(e);
+    if(biz===amt || cr==="事業主借"){
+      rows.push(Object.assign({}, base, {"借方勘定科目":dr,"借方インボイス":inv,"借方金額(円)":biz,"貸方勘定科目":cr,"貸方補助科目":sub,"貸方金額(円)":biz}));
+    } else {
+      // 按分があり、カード・口座で全額を払ったもの：私用の分を事業主貸（法人は立替金）にする複合仕訳
+      rows.push(Object.assign({}, base, {"借方勘定科目":dr,"借方インボイス":inv,"借方金額(円)":biz,"貸方勘定科目":cr,"貸方補助科目":sub,"貸方金額(円)":amt}));
+      rows.push(Object.assign({}, base, {"仕訳メモ":"","借方勘定科目":isHojin()?"立替金":"事業主貸","借方金額(円)":amt-biz}));
+    }
+  });
+  return {rows, skipped, count:no};
+}
+/* MF の CSV は「"」で囲まない（摘要などの「"」は mfText で外してある） */
+const csvMF = y => [MF_HEAD.join(","), ...mfJournal(y).rows.map(r => MF_HEAD.map(h => {
+  const v = r[h]; return v==null ? "" : String(v).replace(/,/g,"，");
+}).join(","))].join("\r\n") + "\r\n";
+/* Shift_JIS（Windows の cp932）に直す。ブラウザには Shift_JIS に書く仕組みがないので、
+   読む仕組み（TextDecoder）で2バイト文字の表を作って逆に引く。0xED・0xEE の行は 0xFA〜0xFC と同じ字なので使わない */
+let SJIS_MAP = null;
+function toSjis(text){
+  if(!SJIS_MAP){
+    SJIS_MAP = new Map();
+    const dec = new TextDecoder("shift_jis");
+    for(let b=0xA1; b<=0xDF; b++) SJIS_MAP.set(dec.decode(new Uint8Array([b])), [b]);
+    for(let h=0x81; h<=0xFC; h++){
+      if((h>0x9F && h<0xE0) || h===0xED || h===0xEE) continue;
+      for(let l=0x40; l<=0xFC; l++){
+        if(l===0x7F) continue;
+        const ch = dec.decode(new Uint8Array([h,l]));
+        if(ch.length===1 && ch!=="�" && !SJIS_MAP.has(ch)) SJIS_MAP.set(ch, [h,l]);
+      }
+    }
+  }
+  // Shift_JIS に無い字を、見た目の近い字に置き換える
+  const FIX = {"〜":"～","—":"―","−":"－"," ":" ","‖":"∥","¢":"￠","£":"￡","¬":"￢"};
+  const out = [];
+  for(const c of text){
+    const ch = FIX[c] || c, cp = ch.codePointAt(0);
+    if(cp < 0x80){ out.push(cp); continue }
+    const b = SJIS_MAP.get(ch);
+    if(b) out.push(...b); else out.push(0x3F);       // どうしても無い字は「?」
+  }
+  return new Uint8Array(out);
+}
 const csvCrypto = y => {
   const rs = cryptoAll(y);
   return [`銘柄,期首数量,期首評価額,取得数量,取得価額,譲渡数量,譲渡収入,平均単価,譲渡原価,手数料,所得,期末数量,期末評価額（翌年繰越）`,
@@ -3088,6 +3195,7 @@ async function drawAll(force){
   mk("全員分の経費の明細", b => saveFile(fname(y,"経費明細_全員"), csvLedger(y, true), b));
   mk("勘定科目×人",       b => saveFile(fname(y,"科目別_人別"),  csvMatrix(y), b));
   box.appendChild(btns);
+  mfButtons(box, y, "全員分のマネーフォワード用");
 
   drawUsers();
 }
