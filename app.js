@@ -2121,6 +2121,11 @@ function mfButtons(box, y, label){
   box.appendChild(btns);
   box.appendChild(el(`<p class="lede" style="margin-top:10px">マネーフォワード クラウド（確定申告・会計）の「会計帳簿」→「仕訳帳」→「インポート」→「仕訳帳」で取り込む CSV です。この年の仕訳は <b>${j.count}件</b>。判定が×の記録と、経費にしない記録（${j.skipped.length}件）は入りません。<br>
     <b>同じファイルを2回取り込むと二重になります。</b>カードや口座をマネーフォワードに連携しているときは、同じ支払いが二重にならないよう気をつけてください。取り込んだ仕訳にはタグ「経費判定君」が付きます。文字化けしたときは UTF-8 のほうを使ってください。</p>`));
+  const checks = j.rows.filter(r => /要確認/.test(r["仕訳メモ"])).length;
+  const taxNote = !S.invoiceDate
+    ? `税区分は、インボイス登録日（基本項目）が空なので、すべて「対象外」で出します。${S.shohi!=="menzei" ? "<b>消費税が課税事業者の設定です。登録している場合は、基本項目にインボイス登録日を入れてください。</b>" : ""}`
+    : `税区分は、インボイス登録日（${esc(S.invoiceDate)}）より前の取引を「対象外」、その日から後を勘定科目ごとの税区分で出します。`;
+  box.appendChild(el(`<p class="lede" style="margin-top:6px">${taxNote}${checks ? `仕訳メモに「要確認」がある仕訳が <b>${checks}件</b> あります。取り込んだあと、マネーフォワードで税区分を確かめてください。` : ""}</p>`));
 }
 
 /* ── CSV ── */
@@ -2162,10 +2167,32 @@ function mfCredit(e){
   if(pay==="bank") return ["普通預金",""];
   return ["事業主借",""];                            // 現金・個人カード・支払方法なし
 }
-/* インボイスの列。本則課税で、適格請求書がなく、1万円以上のときだけ経過措置（1万円未満は少額特例） */
-function mfInvoice(e){
-  if(S.shohi!=="honsoku" || (e.ans||{}).doc==="invoice" || (+e.amount||0) < 10000) return "";
-  return e.date < "2026-10-01" ? "80％控除" : "70％控除";
+/* 税区分。基本項目の「インボイス登録日」より前（未登録なら全部）は免税の期間として、科目のある側をすべて「対象外」にする。
+   登録日から後は、借方を科目と摘要で決める。貸方（事業主借・未払金・普通預金など）はいつも「対象外」。
+   決められないものは空欄にして、仕訳メモに「要確認」を残す。名前は MF の税区分の正式名称 */
+const MF_T10 = "課税仕入 10%", MF_T8 = "課税仕入 (軽)8%", MF_OUT = "対象外";
+const MF_TAX = {"旅費交通費":MF_T10,"車両費":MF_T10,"通信費":MF_T10,"消耗品費":MF_T10,"工具器具備品":MF_T10,
+  "新聞図書費":MF_T10,"接待交際費":MF_T10,"会議費":MF_T10,"研修費":MF_T10,
+  "諸会費":MF_OUT,"利子割引料":"非課税仕入","減価償却費":MF_OUT,"開業費":MF_OUT};
+const mfTaxed = e => /^\d{4}-\d{2}-\d{2}$/.test(S.invoiceDate||"") && e.date >= S.invoiceDate;
+/* acct＝借方の科目（青色申告決算書の名前。資産に計上するものは工具器具備品・開業費）、text＝支払先とメモ。[税区分, 要確認] を返す */
+function mfDebitTax(e, acct, text){
+  if(!mfTaxed(e)) return [MF_OUT, ""];
+  const t = MF_TAX[acct];
+  if(!t) return ["", "税区分要確認"];
+  if(acct==="通信費" && e.payee && e.payee!=="—" && !/[ぁ-んァ-ヶ一-龠々]/.test(e.payee)) return [MF_OUT, "海外事業者・要確認"];
+  if(acct==="新聞図書費" && /新聞/.test(text) && !/電子|デジタル|web|ウェブ/i.test(text)) return [MF_T8, "軽減税率要確認"];
+  if((acct==="接待交際費" || acct==="会議費") && (e.catName==="贈答品・手土産" || /手土産|お土産|持ち帰り|テイクアウト/.test(text))) return [MF_T8, "軽減税率要確認"];
+  return [t, ""];
+}
+/* インボイスの列。課税仕入で、本則課税のときだけ。適格請求書がなく1万円以上なら経過措置（1万円未満は少額特例）。
+   書類が分からない記録は空欄にして「要確認」を残す。[インボイス, 要確認] を返す */
+function mfInvoice(e, tax){
+  if(S.shohi!=="honsoku" || !/^課税仕入/.test(tax)) return ["", ""];
+  const doc = (e.ans||{}).doc;
+  if(doc==="invoice" || (+e.amount||0) < 10000) return ["", ""];
+  if(!doc) return ["", "インボイス要確認"];
+  return [e.date < "2026-10-01" ? "80％控除" : "70％控除", ""];
 }
 function mfJournal(y){
   const rows = [], skipped = [];
@@ -2179,22 +2206,26 @@ function mfJournal(y){
     else if(isHojin()) dr = MF_HOJIN[k] || k;
     if(amt<=0 || biz<=0){ skipped.push(e); return }
     no++;
+    const acct = String(k).startsWith("経費にしない") ? dr : k;   // 税区分を決める科目（法人の名前に直す前）
+    const text = [e.payee,e.memo].filter(x=>x&&x!=="—").join(" ");
+    const [tax, f1] = mfDebitTax(e, acct, text), [inv, f2] = mfInvoice(e, tax);
     const mark = {ok:"○",warn:"△",ng:"×"}[e.verdict]||"";
     let memo = `${MF_TAG} ${e.id} 判定${mark}`;
     if(biz!==amt) memo += ` 按分${e.ratio}%（総額${amt}円・事業分${biz}円）`;   // CSV なので桁区切りのカンマは付けない
     if(isHojin() || hasOthers(y)) memo += ` 利用者:${e.who||""}`;
+    [f1, f2].filter(Boolean).forEach(f => memo += ` ${f}`);
     const base = {"取引No":no, "取引日":e.date.replace(/-/g,"/"),
-      "摘要":mfText([e.payee,e.memo].filter(x=>x&&x!=="—").join(" "),200), "仕訳メモ":mfText(memo,200), "タグ":MF_TAG};
+      "摘要":mfText(text,200), "仕訳メモ":mfText(memo,200), "タグ":MF_TAG};
     let cr, sub = "";
     if(k==="減価償却費"){ cr = /開業費/.test(e.memo||"") ? "開業費" : "工具器具備品"; base["決算整理仕訳"] = "1" }
     else [cr, sub] = mfCredit(e);
-    const inv = mfInvoice(e);
+    const dside = {"借方勘定科目":dr,"借方税区分":tax,"借方インボイス":inv,"借方金額(円)":biz};
     if(biz===amt || cr==="事業主借"){
-      rows.push(Object.assign({}, base, {"借方勘定科目":dr,"借方インボイス":inv,"借方金額(円)":biz,"貸方勘定科目":cr,"貸方補助科目":sub,"貸方金額(円)":biz}));
+      rows.push(Object.assign({}, base, dside, {"貸方勘定科目":cr,"貸方補助科目":sub,"貸方税区分":MF_OUT,"貸方金額(円)":biz}));
     } else {
       // 按分があり、カード・口座で全額を払ったもの：私用の分を事業主貸（法人は立替金）にする複合仕訳
-      rows.push(Object.assign({}, base, {"借方勘定科目":dr,"借方インボイス":inv,"借方金額(円)":biz,"貸方勘定科目":cr,"貸方補助科目":sub,"貸方金額(円)":amt}));
-      rows.push(Object.assign({}, base, {"仕訳メモ":"","借方勘定科目":isHojin()?"立替金":"事業主貸","借方金額(円)":amt-biz}));
+      rows.push(Object.assign({}, base, dside, {"貸方勘定科目":cr,"貸方補助科目":sub,"貸方税区分":MF_OUT,"貸方金額(円)":amt}));
+      rows.push(Object.assign({}, base, {"仕訳メモ":"","借方勘定科目":isHojin()?"立替金":"事業主貸","借方税区分":MF_OUT,"借方金額(円)":amt-biz}));
     }
   });
   return {rows, skipped, count:no};
@@ -2313,6 +2344,8 @@ const SETTINGS=[
    <b>登録していると1,000万円以下でも免除されません。</b>また<b>2割特例はインボイス登録をした人だけ</b>の措置、簡易課税は課税事業者が届出をした場合の計算方法です。<br>
    <span style="color:var(--ink3)">出典：No.6501 納税義務の免除</span>`,
    opts:[["menzei","免税事業者"],["honsoku","本則課税"],["kani","簡易課税"],["niwari","2割特例"]]},
+  {id:"invoiceDate",type:"date",label:"インボイス登録日",
+   hint:"適格請求書発行事業者に登録した日。まだ登録していなければ空欄のままにします。マネーフォワード用の仕訳の税区分が、この日より前は「対象外」、この日から後は勘定科目ごとの税区分になります。"},
   {id:"kyuyo",label:"給与の支払",hint:"個人で給与を1円も払っていなければ、講師謝金やデザイン料の源泉徴収義務がありません。",opts:[["nashi","していない"],["ari","従業員・専従者に払っている"]]},
   {id:"cmethod",label:"暗号資産の評価方法",hint:"「所得税の暗号資産の評価方法の届出書」を出していなければ、法定は総平均法です。一度決めたら継続して使ってください。",opts:[["sohei","総平均法（届出なし）"],["ido","移動平均法（届出済み）"]]},
   {id:"kenpo",label:"健康保険",hint:"勤務先の健康保険なら、株や仮想通貨の所得が増えても保険料は変わりません。国民健康保険だと保険料に跳ねます。",opts:[["shakai","勤務先の健康保険"],["kokuho","国民健康保険"]]},
@@ -2328,8 +2361,8 @@ function drawSettings(){
   const box=document.getElementById("setList"); box.innerHTML="";
   SETTINGS.filter(s=>!s.showIf || s.showIf()).forEach(s=>{
     const w=el(`<div class="q"><div class="qlab">${esc(s.label)}</div><div class="qhint">${esc(s.hint)}</div></div>`);
-    if(s.type==="month"){
-      const i=el(`<input type="month" value="${esc(S[s.id]||"")}">`);
+    if(s.type==="month" || s.type==="date"){
+      const i=el(`<input type="${s.type}" value="${esc(S[s.id]||"")}">`);
       i.onchange=()=>{ S[s.id]=i.value; saveS(); };
       w.appendChild(i);
       box.appendChild(w); return;
