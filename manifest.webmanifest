@@ -1,6 +1,6 @@
 {
-  "name": "経費判定君",
-  "short_name": "経費判定君",
+  "name": "経理の達人",
+  "short_name": "経理の達人",
   "description": "領収書を撮って、経費になるかを判定し、台帳に記録するアプリ",
   "lang": "ja",
   "display": "standalone",

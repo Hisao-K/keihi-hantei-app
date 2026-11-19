@@ -440,7 +440,7 @@ function recordHistory(){
 
 /* ═══════════════ ファイル保存（CSV） ═══════════════ */
 /* 保存先フォルダは指定できないため、ファイル名を「名前＿年＿種類」で固定して年ごとにまとめる */
-const safeName = s => String(s||"").replace(/[\\\/:*?"<>|]/g,"").trim() || "経費判定君";
+const safeName = s => String(s||"").replace(/[\\\/:*?"<>|]/g,"").trim() || "経理の達人";
 const fname = (year, kind, ext) => `${safeName(S.exportName)}_${year}_${kind}.${ext||"csv"}`;
 /* ブラウザのダウンロードで保存する。iPhone のホーム画面アプリはダウンロードできないことがあるので、
    そのときは共有メニュー（「ファイルに保存」など）にファイルを渡す。どちらもだめならコピーする。 */
@@ -2351,10 +2351,10 @@ const SETTINGS=[
   {id:"kenpo",label:"健康保険",hint:"勤務先の健康保険なら、株や仮想通貨の所得が増えても保険料は変わりません。国民健康保険だと保険料に跳ねます。",opts:[["shakai","勤務先の健康保険"],["kokuho","国民健康保険"]]},
   {id:"kyuyoEnd",type:"month",label:"給与が出る最後の月",showIf:()=>isAdmin(),
    hint:"勤め先の給与が最後に出る月。申告の一覧の「給与があるか」「個人事業が本業か副業か」に使います。空欄なら、給与が続く（個人事業は副業）として扱います。"},
-  {id:"exportName",type:"text",label:"保存ファイルの名前",placeholder:"経費判定君",
+  {id:"exportName",type:"text",label:"保存ファイルの名前",placeholder:"経理の達人",
    hint:"CSVとバックアップのファイル名の先頭に付きます。",
    note:`<b>保存先フォルダは指定できません。</b>ブラウザの既定のダウンロード先に入ります。代わりに<b>ファイル名を「名前＿年＿種類」で固定</b>しているので、平らなフォルダでも年ごとにまとまって並びます。<br>
-   例：<span style="font-family:var(--mono)">経費判定君_2026_経費明細.csv</span><br>
+   例：<span style="font-family:var(--mono)">経理の達人_2026_経費明細.csv</span><br>
    PCでは、年ごとのフォルダを作って移すと探しやすくなります。`},
 ];
 function drawSettings(){
